@@ -1,0 +1,159 @@
+extends Node
+
+var packet = null;
+var peer = null;
+var pid = -1;
+
+var connected = false;
+var netfps = 40.0;
+
+var delay = 0.0;
+
+var vplayer = null;
+
+func _ready():
+	set_process_input(true);
+	
+	#get_node("/root/server").host();
+	#connect();
+
+func _input(ie):
+	if ie.type == InputEvent.KEY:
+		if ie.pressed && ie.scancode == KEY_F12 && connected:
+			connected = false;
+			peer.disconnect();
+			print("Disconnecting...");
+
+func connect(ip = "localhost", port = 3000):
+	var address = GDNetAddress.new();
+	address.set_host(ip);
+	address.set_port(port);
+	
+	packet = GDNetHost.new()
+	packet.bind()
+	
+	connected = false;
+	var attempts = 0;
+	
+	while !connected && attempts < 10:
+		peer = packet.connect(address);
+		attempts += 1;
+		OS.delay_msec(100);
+		
+		if (packet.is_event_available()):
+			var event = packet.get_event()
+			if (event.get_event_type() == GDNetEvent.CONNECT):
+				print("Connected.");
+				connected = true;
+				break;
+	
+	if !connected:
+		print("Failed Connecting to ",ip,":",str(port),".");
+	else:
+		get_node("/root/main/gui/menu").hide();
+		get_node("/root/main/gui/ingame").show();
+		
+		var levels = load("res://assets/models/levels/fightyard/fightyard.scn").instance();
+		var player = load("res://assets/scenes/player.scn").instance();
+		vplayer = load("res://assets/scenes/vplayer.scn");
+		
+		get_node("/root/main/env").add_child(levels);
+		get_node("/root/main/env").add_child(player);
+		
+		set_process(true);
+
+func _process(delta):
+	if !connected:
+		return;
+	
+	if (packet.is_event_available()):
+		var event = packet.get_event();
+		
+		if event.get_event_type() == GDNetEvent.DISCONNECT:
+			print("Client disconnected.");
+			peer = null;
+			
+		elif (event.get_event_type() == GDNetEvent.RECEIVE):
+			var data = event.get_var();
+			
+			if data[0] == "accepted":
+				pid = data[1];
+			
+			if data[0] == "event":
+				if data[1] == "p_connected":
+					var pid = data[2];
+					var trans = data[3];
+					
+					var vplayer_instance = vplayer.instance();
+					var name = "vplayer_"+str(pid);
+					vplayer_instance.set_name(name);
+					
+					get_node("/root/main/env").add_child(vplayer_instance);
+					get_node("/root/main/env/"+name).set_global_transform(trans);
+			
+			if data[0] == "server_data":
+				for i in data[1]:
+					if i[0] == "player":
+						var pid = i[1];
+						var trans = i[2];
+						
+						var vplayer_instance = vplayer.instance();
+						var name = "vplayer_"+str(pid);
+						vplayer_instance.set_name(name);
+						
+						get_node("/root/main/env").add_child(vplayer_instance);
+						var node = get_node("/root/main/env/"+name);
+						node.set_global_transform(trans);
+						node.id = pid;
+			
+			if data[0] =="update_srv_data":
+				for i in data[1]:
+					if i[0] == "player":
+						var pid = i[1];
+						var trans = i[2];
+						var lv = i[3];
+						
+						var node = get_node("/root/main/env/vplayer_"+str(pid));
+						if node != null:
+							node.set_global_transform(trans);
+							node.set_linear_velocity(lv);
+			
+			if data[0] == "cmd":
+				if data[1] == "set_pos":
+					var player = get_node("/root/main/env/player");
+					var trans = player.get_global_transform();
+					trans.origin = data[2];
+					player.set_global_transform(trans);
+			
+			if data[0] == "chat":
+				var msg = data[1];
+				if msg.length() > 32:
+					msg = msg.substr(0, 32)+"..";
+				get_node("/root/main/gui/ingame/chatmessage").add_msg(msg);
+	
+	if delay < 1.0/netfps:
+		delay += delta;
+		return;
+	
+	delay = 0.0;
+	
+	if !connected:
+		return;
+	
+	#return;
+	var data = [];
+	var pos = get_node("/root/main/env/player").get_global_transform().origin;
+	var basis = get_node("/root/main/env/player/body").get_global_transform().basis;
+	var lv = get_node("/root/main/env/player").get_linear_velocity();
+	
+	send_var(["transform", pid, Transform(basis, pos), lv]);
+
+func send_var(data, rel = false):
+	if peer == null:
+		return;
+	
+	var msg_type = GDNetMessage.UNSEQUENCED;
+	if rel:
+		msg_type = GDNetMessage.RELIABLE;
+	
+	peer.send_var(data, 0, msg_type);
